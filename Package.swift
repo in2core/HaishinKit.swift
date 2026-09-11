@@ -36,13 +36,11 @@ let package = Package(
     targets: [
         .binaryTarget(
             name: "libsrt",
-            url: "https://github.com/HaishinKit/libsrt-xcframework/releases/download/v1.5.4/libsrt.xcframework.zip",
-            checksum: "76879e2802e45ce043f52871a0a6764d57f833bdb729f2ba6663f4e31d658c4a"
+            path: "libsrt.xcframework"
         ),
         .binaryTarget(
             name: "libdatachannel",
-            url: "https://github.com/HaishinKit/libdatachannel-xcframework/releases/download/v0.24.0/libdatachannel.xcframework.zip",
-            checksum: "52163eed2c9d652d913b20d1fd5a1925c5982b1dcdf335fd916c72ffa385bb26"
+            path: "libdatachannel.xcframework"
         ),
         .target(
             name: "HaishinKit",

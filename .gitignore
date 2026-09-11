@@ -22,12 +22,10 @@ Carthage/*
 .swiftpm/
 
 *.xcsettings
-docs/undocumented.json
 fastlane/report.xml
-libdatachannel.xcframework
-docs/docsets/HaishinKit.docset/Contents/Resources/Documents/undocumented.json
 HaishinKit.json
 SRTHaishinKit.json
 SRTHaishinKit/Vendor/SRT/OpenSSL/
 SRTHaishinKit/Vendor/SRT/srt/
 SRTHaishinKit/Vendor/SRT/Includes/
+xcschememanagement.plist
