@@ -29,3 +29,4 @@ SRTHaishinKit/Vendor/SRT/OpenSSL/
 SRTHaishinKit/Vendor/SRT/srt/
 SRTHaishinKit/Vendor/SRT/Includes/
 xcschememanagement.plist
+*.xcuserdatad
