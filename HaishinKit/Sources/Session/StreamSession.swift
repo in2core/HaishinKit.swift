@@ -45,3 +45,9 @@ public protocol StreamSession: NetworkConnection {
     /// Creates a connection to the server.
     func connect(_ disconnected: @Sendable @escaping () -> Void) async throws
 }
+
+public extension StreamSession {
+    var streamId: String? {
+        nil
+    }
+}
