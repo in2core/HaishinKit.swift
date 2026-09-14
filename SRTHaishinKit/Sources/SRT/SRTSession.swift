@@ -16,6 +16,8 @@ actor SRTSession: StreamSession {
         _stream
     }
 
+    private(set) var streamId: String?
+    
     private let uri: URL
     private let mode: StreamSessionMode
     private var retryCount: Int = 0
@@ -30,7 +32,7 @@ actor SRTSession: StreamSession {
             oldValue?.cancel()
         }
     }
-
+    
     init(uri: URL, mode: StreamSessionMode, configuration: (any StreamSessionConfiguration)?) {
         self.uri = uri
         self.mode = mode
@@ -73,6 +75,7 @@ actor SRTSession: StreamSession {
             try await connect(disconnected)
         }
         _readyState.value = .open
+        streamId = await connection.streamId
         retryCount = 0
         switch mode {
         case .playback:
