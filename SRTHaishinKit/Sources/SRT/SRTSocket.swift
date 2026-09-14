@@ -83,6 +83,13 @@ final actor SRTSocket {
         .init(srt_getsockstate(socket)) ?? .unknown
     }
 
+    var streamID: String? {
+        get throws {
+            let value = try getSocketOption(.streamid).stringValue
+            return value.isEmpty ? nil : value
+        }
+    }
+    
     private(set) var isRunning = false
     private var perf: CBytePerfMon = .init()
     private var socket: SRTSOCKET = SRT_INVALID_SOCK

@@ -30,6 +30,8 @@ public actor SRTConnection: NetworkConnection {
         }
     }
 
+    public private(set) var streamId: String?
+    
     private var socket: SRTSocket?
     private var streams: [SRTStream] = []
     private var listener: SRTSocket?
@@ -91,6 +93,7 @@ public actor SRTConnection: NetworkConnection {
                         case .listener:
                             listener = socket
                             socket = try await listener?.accept(url.options)
+                            self.streamId = try await socket?.streamID
                             await listener?.stopRunning()
                             listener = nil
                         case .rendezvous:
