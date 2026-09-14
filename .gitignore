@@ -31,3 +31,4 @@ SRTHaishinKit.json
 SRTHaishinKit/Vendor/SRT/OpenSSL/
 SRTHaishinKit/Vendor/SRT/srt/
 SRTHaishinKit/Vendor/SRT/Includes/
+*.xcuserdatad
