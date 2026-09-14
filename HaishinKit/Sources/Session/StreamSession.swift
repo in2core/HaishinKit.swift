@@ -31,6 +31,8 @@ public protocol StreamSession: NetworkConnection {
     /// The current ready state.
     var readyState: AsyncStream<StreamSessionReadyState> { get }
 
+    var streamId: String? { get }
+
     /// The stream instance.
     var stream: any StreamConvertible { get async }
 
