@@ -85,8 +85,11 @@ final actor SRTSocket {
 
     var streamID: String? {
         get throws {
-            let value = try getSocketOption(.streamid).stringValue
-            return value.isEmpty ? nil : value
+            var value = try getSocketOption(.streamid).stringValue
+            guard value.isEmpty == false else {
+                return peerHost() ?? nil
+            }
+            return value
         }
     }
     
@@ -271,6 +274,64 @@ final actor SRTSocket {
                 return SRT_ERROR
             }
             return srt_recvmsg(socket, buffer, windowSizeC)
+        }
+    }
+    
+    func peerHost() -> String? {
+        var storage = sockaddr_storage()
+        var length = Int32(MemoryLayout<sockaddr_storage>.size)
+
+        let result = withUnsafeMutablePointer(to: &storage) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                srt_getpeername(socket, $0, &length)
+            }
+        }
+
+        guard result != SRT_ERROR else {
+            return nil
+        }
+
+        switch Int32(storage.ss_family) {
+        case AF_INET:
+            var addr = withUnsafePointer(to: &storage) {
+                $0.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                    $0.pointee
+                }
+            }
+
+            var ip = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+
+            inet_ntop(
+                AF_INET,
+                &addr.sin_addr,
+                &ip,
+                socklen_t(INET_ADDRSTRLEN)
+            )
+
+            let end = ip.firstIndex(of: 0) ?? ip.endIndex
+            return String(decoding: ip[..<end].map { UInt8(bitPattern: $0) }, as: UTF8.self)
+
+        case AF_INET6:
+            var addr = withUnsafePointer(to: &storage) {
+                $0.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) {
+                    $0.pointee
+                }
+            }
+
+            var ip :[CChar] = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            
+            inet_ntop(
+                AF_INET6,
+                &addr.sin6_addr,
+                &ip,
+                socklen_t(INET6_ADDRSTRLEN)
+            )
+            
+            let end = ip.firstIndex(of: 0) ?? ip.endIndex
+            return String(decoding: ip[..<end].map { UInt8(bitPattern: $0) }, as: UTF8.self)
+
+        default:
+            return nil
         }
     }
 }
