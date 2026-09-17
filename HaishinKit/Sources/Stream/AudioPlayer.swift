@@ -15,12 +15,20 @@ public final actor AudioPlayer {
         return connected[playerNode] == true
     }
 
+    public func mute() {
+        audioEngine?.mainMixerNode.outputVolume = 0
+    }
+
+    public func unmute() {
+        audioEngine?.mainMixerNode.outputVolume = 1.0
+    }
+
     func connect(_ playerNode: AudioPlayerNode, format: AVAudioFormat?) {
         guard let audioEngine, let avPlayerNode = playerNodes[playerNode] else {
             return
         }
         if let format {
-            audioEngine.connect(avPlayerNode, to: audioEngine.outputNode, format: format)
+            audioEngine.connect(avPlayerNode, to: audioEngine.mainMixerNode, format: format)
             if !audioEngine.isRunning {
                 try? audioEngine.start()
             }

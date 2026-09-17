@@ -53,6 +53,7 @@ final class PlaybackViewModel: ObservableObject {
                 await session.stream.addOutput(view)
             }
             await session.stream.attachAudioPlayer(audioPlayer)
+            await audioPlayer.mute()
             Task {
                 for await readyState in await session.readyState {
                     self.readyState = readyState
