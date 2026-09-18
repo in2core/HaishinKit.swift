@@ -13,6 +13,12 @@ package enum HEVCNALUnitType: UInt8 {
     case codedSliceRaslN = 8
     case codedSliceRsslR = 9
     /// 10...15 Reserved
+    case blaWLp = 16
+    case blaWRadl = 17
+    case blaNLp = 18
+    case idrWRadl = 19
+    case idrNLp = 20
+    case craNut = 21
     case vps = 32
     case sps = 33
     case pps = 34
