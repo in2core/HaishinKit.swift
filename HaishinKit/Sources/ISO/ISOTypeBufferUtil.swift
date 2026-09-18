@@ -34,18 +34,64 @@ package struct ISOTypeBufferUtil {
     }
 
     static package func toNALFileFormat(_ data: inout Data) {
-        var lastIndexOf = data.count - 1
-        for i in (2..<data.count).reversed() {
-            guard data[i] == 1 && data[i - 1] == 0 && data[i - 2] == 0 else {
-                continue
+        var nalRanges: [Range<Int>] = []
+
+        func startCode(at index: Int) -> Int {
+            guard index + 2 < data.count else {
+                return 0
             }
-            let startCodeLength = 0 <= i - 3 && data[i - 3] == 0 ? 4 : 3
-            let start = 4 - startCodeLength
-            let length = lastIndexOf - i
-            if 0 < length {
-                data.replaceSubrange(i - startCodeLength + 1...i, with: Int32(length).bigEndian.data[start...])
-                lastIndexOf = i - startCodeLength
+
+            if data[index] == 0 &&
+               data[index + 1] == 0 {
+
+                if data[index + 2] == 1 {
+                    return 3
+                }
+
+                if index + 3 < data.count &&
+                   data[index + 2] == 0 &&
+                   data[index + 3] == 1 {
+                    return 4
+                }
+            }
+
+            return 0
+        }
+
+        var index = 0
+        var nalStart: Int?
+
+        while index < data.count {
+            let codeLength = startCode(at: index)
+
+            if codeLength > 0 {
+                if let nalStart {
+                    nalRanges.append(nalStart..<index)
+                }
+
+                nalStart = index + codeLength
+                index += codeLength
+            } else {
+                index += 1
             }
         }
+
+        if let nalStart, nalStart < data.count {
+            nalRanges.append(nalStart..<data.count)
+        }
+
+        var output = Data()
+
+        for range in nalRanges {
+            let length = UInt32(range.count).bigEndian
+
+            withUnsafeBytes(of: length) {
+                output.append(contentsOf: $0)
+            }
+
+            output.append(data[range])
+        }
+
+        data = output
     }
 }

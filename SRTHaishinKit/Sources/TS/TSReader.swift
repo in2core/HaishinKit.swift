@@ -122,7 +122,20 @@ final class TSReader {
             isNotSync = !units.contains { $0.type == .idr }
         case .h265:
             let units = nalUnitReader.read(&pes.data, type: HEVCNALUnit.self)
-            isNotSync = units.contains { $0.type == .sps }
+            isNotSync = !units.contains(where: { (unit: HEVCNALUnit) in
+                switch unit.type {
+                case .blaWLp,
+                     .blaWRadl,
+                     .blaNLp,
+                     .idrWRadl,
+                     .idrNLp,
+                     .craNut:
+                    return true
+
+                default:
+                    return false
+                }
+            })
         case .adtsAac:
             isNotSync = false
         default:
