@@ -60,16 +60,20 @@ final class AudioCodec {
             var offset = 0
             var presentationTimeStamp = sampleBuffer.presentationTimeStamp
             for i in 0..<sampleBuffer.numSamples {
-                guard let buffer = makeInputBuffer() as? AVAudioCompressedBuffer else {
+                let sampleSize = CMSampleBufferGetSampleSize(sampleBuffer, at: i)
+                guard sampleSize > ADTSHeader.size else {
+                    offset += max(sampleSize, 0)
                     continue
                 }
-                let sampleSize = CMSampleBufferGetSampleSize(sampleBuffer, at: i)
-                let byteCount = sampleSize - ADTSHeader.size
-                buffer.packetDescriptions?.pointee = AudioStreamPacketDescription(mStartOffset: 0, mVariableFramesInPacket: 0, mDataByteSize: UInt32(byteCount))
+                let byteCount:UInt32 = UInt32(sampleSize - ADTSHeader.size)
+                guard let buffer = makeInputBuffer(maximumPacketSize: byteCount) as? AVAudioCompressedBuffer else {
+                    continue
+                }
+                buffer.packetDescriptions?.pointee = AudioStreamPacketDescription(mStartOffset: 0, mVariableFramesInPacket: 0, mDataByteSize: byteCount)
                 buffer.packetCount = 1
-                buffer.byteLength = UInt32(byteCount)
+                buffer.byteLength = byteCount
                 if let blockBuffer = sampleBuffer.dataBuffer {
-                    CMBlockBufferCopyDataBytes(blockBuffer, atOffset: offset + ADTSHeader.size, dataLength: byteCount, destination: buffer.data)
+                    CMBlockBufferCopyDataBytes(blockBuffer, atOffset: offset + ADTSHeader.size, dataLength: Int(byteCount), destination: buffer.data)
                     append(buffer, when: presentationTimeStamp.makeAudioTime())
                     presentationTimeStamp = CMTimeAdd(presentationTimeStamp, CMTime(value: CMTimeValue(1024), timescale: sampleBuffer.presentationTimeStamp.timescale))
                     offset += sampleSize
@@ -98,9 +102,25 @@ final class AudioCodec {
             outputStatus = audioConverter.convert(to: outputBuffer, error: &error) { inNumberFrames, inputStatus in
                 switch self.inputBuffer {
                 case let inputBuffer as AVAudioCompressedBuffer:
-                    inputBuffer.copy(audioBuffer)
+                    guard let source = audioBuffer as? AVAudioCompressedBuffer else {
+                        inputStatus.pointee = .noDataNow
+                        return nil
+                    }
+                    var destination = inputBuffer
+                    if source.byteLength > destination.byteCapacity || source.packetCount > destination.packetCapacity {
+                        guard let largerBuffer = makeInputBuffer(
+                            maximumPacketSize: max(Self.defaultFrameCapacity, source.byteLength),
+                            packetCapacity: max(1, source.packetCount)
+                        ) as? AVAudioCompressedBuffer else {
+                            inputStatus.pointee = .noDataNow
+                            return nil
+                        }
+                        inputBuffers[inputBuffersCursor] = largerBuffer
+                        destination = largerBuffer
+                    }
+                    destination.copy(source)
                     inputStatus.pointee = .haveData
-                    return inputBuffer
+                    return destination
                 case let inputBuffer as AVAudioPCMBuffer:
                     if self.ringBuffer?.isDataAvailable(inNumberFrames) == true {
                         inputBuffer.frameLength = inNumberFrames
@@ -134,7 +154,10 @@ final class AudioCodec {
         } while(outputStatus == .haveData && settings.format != .pcm)
     }
 
-    private func makeInputBuffer() -> AVAudioBuffer? {
+    private func makeInputBuffer(
+        maximumPacketSize: UInt32 = AudioCodec.defaultFrameCapacity,
+        packetCapacity: AVAudioPacketCount = 1
+    ) -> AVAudioBuffer? {
         guard let inputFormat else {
             return nil
         }
@@ -144,7 +167,7 @@ final class AudioCodec {
             buffer?.frameLength = Self.defaultFrameCapacity
             return buffer
         default:
-            return AVAudioCompressedBuffer(format: inputFormat, packetCapacity: 1, maximumPacketSize: 1024)
+            return AVAudioCompressedBuffer(format: inputFormat, packetCapacity: packetCapacity, maximumPacketSize: Int(maximumPacketSize))
         }
     }
 
