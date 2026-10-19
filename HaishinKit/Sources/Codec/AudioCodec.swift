@@ -108,14 +108,14 @@ final class AudioCodec {
                     }
                     var destination = inputBuffer
                     if source.byteLength > destination.byteCapacity || source.packetCount > destination.packetCapacity {
-                        guard let largerBuffer = makeInputBuffer(
+                        guard let largerBuffer = self.makeInputBuffer(
                             maximumPacketSize: max(Self.defaultFrameCapacity, source.byteLength),
                             packetCapacity: max(1, source.packetCount)
                         ) as? AVAudioCompressedBuffer else {
                             inputStatus.pointee = .noDataNow
                             return nil
                         }
-                        inputBuffers[inputBuffersCursor] = largerBuffer
+                        self.inputBuffers[self.inputBuffersCursor] = largerBuffer
                         destination = largerBuffer
                     }
                     destination.copy(source)
