@@ -36,6 +36,9 @@ public actor SRTConnection: NetworkConnection {
     private var streams: [SRTStream] = []
     private var listener: SRTSocket?
     private var networkMonitor: NetworkMonitor?
+    private var isClosed = false
+    private var isConnecting = false
+    private var closeTask: Task<Void, Never>?
 
     /// Creates an object.
     public init() {
@@ -68,6 +71,32 @@ public actor SRTConnection: NetworkConnection {
         }
     }
 
+    private func monitorConnection(on activeSocket: SRTSocket) async {
+        guard !isClosed, socket === activeSocket else { return }
+
+        let monitor = await activeSocket.makeNetworkMonitor()
+
+        guard !isClosed, socket === activeSocket else { return }
+
+        networkMonitor = monitor
+        await monitor.startRunning()
+
+        guard !isClosed, networkMonitor === monitor else {
+            await monitor.stopRunning()
+            return
+        }
+
+        for await event in await monitor.event {
+            guard !isClosed, networkMonitor === monitor else {
+                break
+            }
+
+            for stream in streams {
+                await stream.dispatch(event)
+            }
+        }
+    }
+    
     /// Creates a connection to the server or waits for an incoming connection.
     ///
     /// - Parameters:
@@ -78,77 +107,155 @@ public actor SRTConnection: NetworkConnection {
     /// - srt://:9000?mode=listener
     ///   - Wait for connections as a server.
     public func connect(_ uri: URL?) async throws {
+        guard !isClosed else { throw CancellationError() }
+        guard !isConnecting else { throw Error.invalidState }
+
         guard let url = SRTSocketURL(uri) else {
             throw Error.unsupportedUri(uri)
         }
+
+        guard let openingSocket = socket else {
+            throw Error.invalidState
+        }
+
+        isConnecting = true
+        defer { isConnecting = false }
+
         do {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Swift.Error>) in
-                Task {
-                    do {
-                        try await socket?.open(url)
-                        self.uri = uri
-                        switch url.mode {
-                        case .caller:
-                            break
-                        case .listener:
-                            listener = socket
-                            socket = try await listener?.accept(url.options)
-                            self.streamId = try await socket?.streamID
-                            await listener?.stopRunning()
-                            listener = nil
-                        case .rendezvous:
-                            break
-                        }
-                        connected = await socket?.status == .connected
-                        continuation.resume()
-                    } catch {
-                        socket = SRTSocket()
-                        continuation.resume(throwing: error)
-                    }
+            try await openingSocket.open(url)
+
+            guard !isClosed, socket === openingSocket else {
+                throw CancellationError()
+            }
+
+            self.uri = uri
+
+            let activeSocket: SRTSocket
+
+            switch url.mode {
+            case .caller, .rendezvous:
+                activeSocket = openingSocket
+
+            case .listener:
+                listener = openingSocket
+
+                let acceptedSocket = try await openingSocket.accept(url.options)
+
+                guard !isClosed else {
+                    await acceptedSocket.stopRunning()
+                    throw CancellationError()
+                }
+
+                socket = acceptedSocket
+                activeSocket = acceptedSocket
+
+                streamId = try await acceptedSocket.streamID
+
+                guard !isClosed else {
+                    throw CancellationError()
+                }
+
+                await openingSocket.stopRunning()
+
+                if listener === openingSocket {
+                    listener = nil
                 }
             }
-            Task {
-                guard let socket else {
-                    return
-                }
-                let networkMonitor = await socket.makeNetworkMonitor()
-                self.networkMonitor = networkMonitor
-                await networkMonitor.startRunning()
-                for await event in await networkMonitor.event {
-                    for stream in streams {
-                        await stream.dispatch(event)
-                    }
+
+            guard !isClosed else {
+                throw CancellationError()
+            }
+
+            let status = await activeSocket.status
+
+            guard !isClosed, socket === activeSocket else {
+                throw CancellationError()
+            }
+
+            connected = status == .connected
+
+            if connected {
+                Task { [weak self] in
+                    await self?.monitorConnection(on: activeSocket)
                 }
             }
-        } catch let error as SRTSocket.Error {
-            switch error {
-            case .rejected(let reason):
-                throw Error.failedToConnect(reason)
-            default:
-                throw Error.invalidState
-            }
+
         } catch {
+            let currentSocket = socket
+            let currentListener = listener
+
+            await currentSocket?.stopRunning()
+
+            if let currentListener, currentListener !== currentSocket {
+                await currentListener.stopRunning()
+            }
+
+            guard !isClosed else {
+                throw CancellationError()
+            }
+
+            socket = SRTSocket()
+            listener = nil
+            self.uri = nil
+            streamId = nil
+            connected = false
+
+            if error is CancellationError {
+                throw CancellationError()
+            }
+
+            if let error = error as? SRTSocket.Error {
+                switch error {
+                case .rejected(let reason):
+                    throw Error.failedToConnect(reason)
+                default:
+                    throw Error.invalidState
+                }
+            }
+
             throw Error.invalidState
         }
     }
 
     /// Closes a connection.
     public func close() async {
-        guard uri != nil else {
+        if let closeTask {
+            await closeTask.value
             return
         }
-        await networkMonitor?.stopRunning()
-        networkMonitor = nil
-        for stream in streams {
-            await stream.close()
-        }
-        await socket?.stopRunning()
-        socket = nil
-        await listener?.stopRunning()
-        listener = nil
-        uri = nil
+
+        // Invalidate pending operations before any await.
+        isClosed = true
         connected = false
-        socket = SRTSocket()
+        uri = nil
+        streamId = nil
+
+        let oldSocket = socket
+        let oldListener = listener
+        let oldMonitor = networkMonitor
+        let oldStreams = streams
+
+        socket = nil
+        listener = nil
+        networkMonitor = nil
+
+        let task = Task {
+            // Close sockets first to interrupt pending SRT operations.
+            await oldSocket?.stopRunning()
+
+            if let oldListener, oldListener !== oldSocket {
+                await oldListener.stopRunning()
+            }
+
+            await oldMonitor?.stopRunning()
+
+            for stream in oldStreams {
+                await stream.close()
+            }
+        }
+
+        closeTask = task
+        await task.value
     }
 
     func send(_ data: Data) async {
@@ -160,15 +267,26 @@ public actor SRTConnection: NetworkConnection {
     }
 
     func recv() {
-        Task {
-            guard let socket else {
-                return
+        guard !isClosed, let activeSocket = socket else { return }
+
+        Task { [weak self] in
+            for await data in await activeSocket.inputs {
+                await self?.deliverInput(data, from: activeSocket)
             }
-            for await data in await socket.inputs {
-                await streams.first?.doInput(data)
+
+            if await self?.isCurrentSocket(activeSocket) == true {
+                await self?.close()
             }
-            await close()
         }
+    }
+
+    private func isCurrentSocket(_ candidate: SRTSocket) -> Bool {
+        !isClosed && socket === candidate
+    }
+
+    private func deliverInput(_ data: Data, from source: SRTSocket) async {
+        guard isCurrentSocket(source) else { return }
+        await streams.first?.doInput(data)
     }
 
     func addStream(_ stream: SRTStream) {

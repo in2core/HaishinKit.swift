@@ -32,6 +32,8 @@ actor SRTSession: StreamSession {
             oldValue?.cancel()
         }
     }
+    private var isClosed = false
+    private var closeTask: Task<Void, Never>?
     
     init(uri: URL, mode: StreamSessionMode, configuration: (any StreamSessionConfiguration)?) {
         self.uri = uri
@@ -43,13 +45,20 @@ actor SRTSession: StreamSession {
     }
 
     func connect(_ disconnected: @Sendable @escaping () -> Void) async throws {
-        guard await connection.connected == false else {
-            return
-        }
+        guard !isClosed else { throw CancellationError() }
+
+        guard await !connection.connected else { return }
+        guard !isClosed else { throw CancellationError() }
+
         _readyState.value = .connecting
+
         do {
             try await connection.connect(uri)
         } catch {
+            guard !isClosed, !Task.isCancelled else {
+                throw CancellationError()
+            }
+
             if let error = error as? SRTConnection.Error {
                 switch error {
                 case .failedToConnect(let reason):
@@ -64,6 +73,7 @@ actor SRTSession: StreamSession {
                     break
                 }
             }
+
             guard retryCount < maxRetryCount else {
                 retryCount = 0
                 _readyState.value = .closed
@@ -71,35 +81,74 @@ actor SRTSession: StreamSession {
             }
             // It is being delayed using backoff for congestion control.
             try await Task.sleep(nanoseconds: UInt64(pow(2.0, Double(retryCount))) * 1_000_000_000)
+
+            guard !isClosed, !Task.isCancelled else {
+                throw CancellationError()
+            }
+
             retryCount += 1
-            try await connect(disconnected)
+            return try await connect(disconnected)
         }
-        _readyState.value = .open
+
+        guard !isClosed else { throw CancellationError() }
+
         streamId = await connection.streamId
-        retryCount = 0
+        guard !isClosed else { throw CancellationError() }
+
         switch mode {
         case .playback:
             await _stream.play()
         case .publish:
             await _stream.publish()
         }
+
+        guard !isClosed else { throw CancellationError() }
+
+        retryCount = 0
+        _readyState.value = .open
+
         disconnctedTask = Task {
+            guard !isClosed else { return }
+
             cancellables.removeAll()
-            await connection.$connected.sink {
-                if $0 == false {
+
+            let subscription = await connection.$connected.sink {
+                if !$0 {
                     disconnected()
                 }
-            }.store(in: &cancellables)
+            }
+
+            guard !isClosed else {
+                subscription.cancel()
+                return
+            }
+
+            subscription.store(in: &cancellables)
         }
     }
 
     func close() async throws {
-        guard await connection.connected else {
+        if let closeTask {
+            await closeTask.value
             return
         }
+
+        isClosed = true
         _readyState.value = .closing
-        await connection.close()
+
+        disconnctedTask = nil
+        cancellables.removeAll()
+
+        let connection = connection
+        let task = Task {
+            await connection.close()
+        }
+
+        closeTask = task
+        await task.value
+
         retryCount = 0
+        streamId = nil
         _readyState.value = .closed
     }
 }
