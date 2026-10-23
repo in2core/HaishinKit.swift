@@ -153,6 +153,9 @@ final actor SRTSocket {
             throw makeSocketError()
         }
         let status: Int32 = try await {
+            guard socket != SRT_INVALID_SOCK else {
+                throw CancellationError()
+            }
             switch url.mode {
             case .caller:
                 guard let host = url.url.host else {
