@@ -60,17 +60,33 @@ final actor SRTSocket {
 
     var inputs: AsyncStream<Data> {
         AsyncStream<Data> { continuation in
-            // If Task.detached is not used, closing will result in a deadlock.
-            Task.detached {
+            Task.detached { [self] in
+                let descriptor = await self.socket
+                let bufferSize = await self.windowSizeC
+
+                var buffer = Data(count: Int(bufferSize))
+
                 while await self.connected {
-                    let result = await self.recvmsg()
-                    if 0 <= result {
-                        continuation.yield(await self.incomingBuffer.subdata(in: 0..<Data.Index(result)))
-                    } else {
-                        await self.stopRunning()
-                        continuation.finish()
+                    let result = buffer.withUnsafeMutableBytes { pointer -> Int32 in
+                        guard let bytes = pointer.baseAddress?
+                            .assumingMemoryBound(to: CChar.self) else {
+                            return SRT_ERROR
+                        }
+
+                        return srt_recvmsg(descriptor, bytes, bufferSize)
                     }
+
+                    guard result >= 0 else {
+                        await self.stopRunning()
+                        break
+                    }
+
+                    continuation.yield(
+                        buffer.subdata(in: 0..<Int(result))
+                    )
                 }
+
+                continuation.finish()
             }
         }
     }
@@ -136,15 +152,22 @@ final actor SRTSocket {
         guard configure(url.options, restriction: .pre) else {
             throw makeSocketError()
         }
-        let status: Int32 = try {
+        let status: Int32 = try await {
             switch url.mode {
             case .caller:
-                guard let remote = url.remote else {
+                guard let host = url.url.host else {
                     throw Error.invalidArgument("missing remote url")
                 }
-                return try remote.resolve(AI_ADDRCONFIG) { name, length in
-                    srt_connect(socket, name, length)
-                }
+
+                let port = url.url.port ?? SRTSocketURL.defaultPort
+                let descriptor = socket
+
+                return try await Task.detached {
+                    try AddrInfo(host: host, port: port).resolve(AI_ADDRCONFIG) {
+                        name, length in
+                        srt_connect(descriptor, name, length)
+                    }
+                }.value
             case .listener:
                 guard let local = url.local else {
                     throw Error.invalidArgument("missing local url")
@@ -339,7 +362,7 @@ final actor SRTSocket {
 extension SRTSocket: AsyncRunner {
     // MARK: AsyncRunner
     func startRunning() async {
-        guard !isRunning else {
+        guard !isRunning, socket != SRT_INVALID_SOCK else {
             return
         }
         let stream = AsyncStream<Data> { continuation in
@@ -357,13 +380,17 @@ extension SRTSocket: AsyncRunner {
     }
 
     func stopRunning() async {
-        guard isRunning else {
-            return
-        }
-        srt_close(socket)
+        let descriptor = socket
+
         socket = SRT_INVALID_SOCK
         outputs = nil
         isRunning = false
+
+        guard descriptor != SRT_INVALID_SOCK else {
+            return
+        }
+
+        srt_close(descriptor)
     }
 }
 
