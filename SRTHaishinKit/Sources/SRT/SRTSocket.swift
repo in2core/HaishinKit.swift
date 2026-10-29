@@ -3,6 +3,111 @@ import HaishinKit
 import libsrt
 import Logboard
 
+/// Waits for each listener on its own SRT epoll instance, then calls
+/// `srt_accept` on that exact listener socket. Separate epoll instances keep
+/// one listener's accept/close lifecycle from changing another's readiness.
+private actor SRTListenerAcceptor {
+    static let shared = SRTListenerAcceptor()
+
+    private struct PendingAccept {
+        let epoll: Int32
+        let continuation: CheckedContinuation<SRTSOCKET, Swift.Error>
+    }
+
+    private var pending: [SRTSOCKET: PendingAccept] = [:]
+
+    func accept(listener: SRTSOCKET) async throws -> SRTSOCKET {
+        return try await withCheckedThrowingContinuation { continuation in
+            guard pending[listener] == nil else {
+                continuation.resume(throwing: SRTSocket.Error.illegalState(
+                    "An accept is already pending for listener socket \(listener)"
+                ))
+                return
+            }
+
+            let epoll = srt_epoll_create()
+            guard epoll != SRT_ERROR else {
+                continuation.resume(throwing: SRTSocket.Error.illegalState(
+                    "Could not create SRT epoll instance: \(String(cString: srt_getlasterror_str()))"
+                ))
+                return
+            }
+
+            var events = Int32(SRT_EPOLL_IN.rawValue)
+            guard srt_epoll_add_usock(epoll, listener, &events) != SRT_ERROR else {
+                _ = srt_epoll_release(epoll)
+                continuation.resume(throwing: SRTSocket.Error.illegalState(
+                    "Could not add listener socket \(listener) to SRT epoll: \(String(cString: srt_getlasterror_str()))"
+                ))
+                return
+            }
+            pending[listener] = PendingAccept(epoll: epoll, continuation: continuation)
+            Task { await runAcceptLoop(listener: listener, epoll: epoll) }
+        }
+    }
+
+    func cancel(listener: SRTSOCKET) {
+        guard let accept = pending.removeValue(forKey: listener) else { return }
+        _ = srt_epoll_remove_usock(accept.epoll, listener)
+        accept.continuation.resume(throwing: CancellationError())
+    }
+
+    private func runAcceptLoop(listener: SRTSOCKET, epoll: Int32) async {
+        while pending[listener] != nil {
+            let (waitResult, readySocket, waitError) = await Task.detached(priority: .userInitiated) {
+                var readSockets = [SRTSOCKET](repeating: SRT_INVALID_SOCK, count: 1)
+                var readCount: Int32 = 1
+                var writeCount: Int32 = 0
+                let result = readSockets.withUnsafeMutableBufferPointer { buffer in
+                    srt_epoll_wait(epoll, buffer.baseAddress, &readCount, nil, &writeCount,
+                                   -1, nil, nil, nil, nil)
+                }
+                let ready = result > 0 && readCount > 0 ? readSockets[0] : SRT_INVALID_SOCK
+                let error = result == SRT_ERROR ? String(cString: srt_getlasterror_str()) : ""
+                return (result, ready, error)
+            }.value
+
+            guard let entry = pending[listener] else {
+                _ = srt_epoll_release(epoll)
+                return
+            }
+
+            if waitResult == 0 {
+                continue
+            }
+
+            if waitResult == SRT_ERROR {
+                pending.removeValue(forKey: listener)
+                _ = srt_epoll_release(epoll)
+                entry.continuation.resume(throwing: SRTSocket.Error.illegalState(waitError))
+                return
+            }
+
+            guard readySocket == listener else {
+                pending.removeValue(forKey: listener)
+                _ = srt_epoll_release(epoll)
+                let message = "SRT epoll returned unexpected listener socket \(readySocket)"
+                entry.continuation.resume(throwing: SRTSocket.Error.illegalState(message))
+                return
+            }
+
+            pending.removeValue(forKey: listener)
+            _ = srt_epoll_remove_usock(epoll, listener)
+            _ = srt_epoll_release(epoll)
+            let acceptedSocket = srt_accept(listener, nil, nil)
+            if acceptedSocket == SRT_ERROR {
+                let message = String(cString: srt_getlasterror_str())
+                entry.continuation.resume(throwing: SRTSocket.Error.illegalState(message))
+            } else {
+                entry.continuation.resume(returning: acceptedSocket)
+            }
+            return
+        }
+
+        _ = srt_epoll_release(epoll)
+    }
+}
+
 final actor SRTSocket {
     static let payloadSize: Int = 1316
 
@@ -222,21 +327,11 @@ final actor SRTSocket {
     }
 
     func accept(_ options: [SRTSocketOption]) async throws -> SRTSocket {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SRTSocket, Swift.Error>) in
-            Task.detached { [self] in
-                do {
-                    let accept = srt_accept(await socket, nil, nil)
-                    guard -1 < accept else {
-                        throw await makeSocketError()
-                    }
-                    let socket = try await SRTSocket(socket: accept, options: options)
-                    await socket.startRunning()
-                    continuation.resume(returning: socket)
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
+        let listenerHandle = socket
+        let acceptedHandle = try await SRTListenerAcceptor.shared.accept(listener: listenerHandle)
+        let acceptedSocket = try await SRTSocket(socket: acceptedHandle, options: options)
+        await acceptedSocket.startRunning()
+        return acceptedSocket
     }
 
     func send(_ data: Data) throws {
@@ -393,6 +488,7 @@ extension SRTSocket: AsyncRunner {
             return
         }
 
+        await SRTListenerAcceptor.shared.cancel(listener: descriptor)
         srt_close(descriptor)
     }
 }
