@@ -308,6 +308,12 @@ final actor SRTSocket {
                 }
             }
         }()
+        // stopRunning() can close the descriptor while the detached native
+        // srt_connect() is in progress. Do not query libsrt for a rejection
+        // reason (or configure/use the socket) after that close has happened.
+        guard socket != SRT_INVALID_SOCK else {
+            throw CancellationError()
+        }
         guard status != SRT_ERROR else {
             let reason = SRTRejectReason(socket: socket) ?? .unknown
             throw Error.rejected(reason)
