@@ -3,6 +3,30 @@ import Foundation
 import HaishinKit
 import libsrt
 
+/// Owns libsrt's process-wide initialization. Individual connections must not
+/// call srt_cleanup() as they are released while other connections may still
+/// be using the shared library.
+private enum SRTLibraryLifecycle {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var isStarted = false
+
+    static func startupIfNeeded() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isStarted else { return }
+        _ = srt_startup()
+        isStarted = true
+    }
+
+    static func shutdown() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard isStarted else { return }
+        isStarted = false
+        _ = srt_cleanup()
+    }
+}
+
 /// An actor that provides the interface to control a SRT connection.
 ///
 /// Supports a one-to-one connection. Multiple connections cannot be established.
@@ -38,17 +62,23 @@ public actor SRTConnection: NetworkConnection {
     private var networkMonitor: NetworkMonitor?
     private var isClosed = false
     private var isConnecting = false
+    private var connectCompletionWaiters: [CheckedContinuation<Void, Never>] = []
     private var closeTask: Task<Void, Never>?
 
     /// Creates an object.
     public init() {
-        srt_startup()
+        SRTLibraryLifecycle.startupIfNeeded()
         socket = SRTSocket()
+    }
+
+    /// Cleans up libsrt's process-wide resources after every SRT connection
+    /// and in-flight operation has been shut down.
+    public nonisolated static func shutdownLibrary() {
+        SRTLibraryLifecycle.shutdown()
     }
 
     deinit {
         streams.removeAll()
-        srt_cleanup()
     }
 
     /// Gets a SRTSocketOption.
@@ -119,7 +149,7 @@ public actor SRTConnection: NetworkConnection {
         }
 
         isConnecting = true
-        defer { isConnecting = false }
+        defer { finishConnect() }
 
         do {
             try await openingSocket.open(url)
@@ -221,6 +251,7 @@ public actor SRTConnection: NetworkConnection {
     public func close() async {
         if let closeTask {
             await closeTask.value
+            await waitForConnectToFinish()
             return
         }
 
@@ -256,6 +287,30 @@ public actor SRTConnection: NetworkConnection {
 
         closeTask = task
         await task.value
+        // stopRunning() interrupts the native connect/accept. Wait for the
+        // suspended connect() call to unwind before allowing this connection
+        // to be released (and its SRT library reference to be cleaned up).
+        await waitForConnectToFinish()
+    }
+
+    private func finishConnect() {
+        isConnecting = false
+        let waiters = connectCompletionWaiters
+        connectCompletionWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    private func waitForConnectToFinish() async {
+        guard isConnecting else { return }
+        await withCheckedContinuation { continuation in
+            if isConnecting {
+                connectCompletionWaiters.append(continuation)
+            } else {
+                continuation.resume()
+            }
+        }
     }
 
     func send(_ data: Data) async {
