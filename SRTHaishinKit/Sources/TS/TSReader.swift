@@ -46,6 +46,7 @@ final class TSReader {
     private var formatDescriptions: [UInt16: CMFormatDescription] = [:]
     private var packetizedElementaryStreams: [UInt16: PacketizedElementaryStream] = [:]
     private var previousPresentationTimeStamps: [UInt16: CMTime] = [:]
+    private var hasLoggedInvalidPacket = false
 
     /// Create a  new instance.
     init() {
@@ -55,7 +56,17 @@ final class TSReader {
     func read(_ data: Data) -> Int {
         let count = data.count / TSPacket.size
         for i in 0..<count {
-            guard let packet = TSPacket(data: data.subdata(in: i * TSPacket.size..<(i + 1) * TSPacket.size)) else {
+            let offset = i * TSPacket.size
+            let packetData = data.subdata(in: offset..<(offset + TSPacket.size))
+            guard let packet = TSPacket(data: packetData) else {
+                if !hasLoggedInvalidPacket {
+                    let syncByte = packetData.first ?? 0
+                    logger.error(
+                        "MPEG-TS parser rejected a transport packet: invalid sync byte " +
+                            "0x\(String(syncByte, radix: 16)) at input offset \(offset)"
+                    )
+                    hasLoggedInvalidPacket = true
+                }
                 continue
             }
             if packet.pid == 0x0000 {
@@ -80,6 +91,7 @@ final class TSReader {
         formatDescriptions.removeAll()
         packetizedElementaryStreams.removeAll()
         previousPresentationTimeStamps.removeAll()
+        hasLoggedInvalidPacket = false
         continuation = nil
     }
 
@@ -114,10 +126,13 @@ final class TSReader {
         switch data.streamType {
         case .h264:
             let units = nalUnitReader.read(&pes.data, type: H264NALUnit.self)
-            if let unit = units.first(where: { $0.type == .idr || $0.type == .slice }) {
-                var data = Data([0x00, 0x00, 0x00, 0x01])
-                data.append(unit.data)
-                pes.data = data
+            var accessUnit = Data()
+            for unit in units.reversed() where unit.type == .idr || unit.type == .slice {
+                accessUnit.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+                accessUnit.append(unit.data)
+            }
+            if !accessUnit.isEmpty {
+                pes.data = accessUnit
             }
             isNotSync = !units.contains { $0.type == .idr }
         case .h265:
