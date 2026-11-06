@@ -19,6 +19,10 @@ final actor MediaLink {
     }
     private var duration: TimeInterval = MediaLink.duration
     private var presentationTimeStampOrigin: CMTime = .invalid
+    private var lastAudioTime: TimeInterval?
+    private var audioClockOffset: TimeInterval = 0
+    private var isUsingAudioClock = false
+    private var lastDisplayTimestamp: TimeInterval?
     private lazy var displayLink = DisplayLinkChoreographer()
     private weak var audioPlayer: AudioPlayerNode?
 
@@ -49,10 +53,32 @@ final actor MediaLink {
     }
 
     private func getCurrentTime(_ timestamp: TimeInterval) async -> TimeInterval {
-        defer {
-            duration += timestamp
+        duration += timestamp
+        guard let audioPlayer else {
+            isUsingAudioClock = false
+            lastAudioTime = nil
+            return duration
         }
-        return await audioPlayer?.currentTime ?? duration
+
+        let audioTime = await audioPlayer.currentTime
+        guard audioTime.isFinite else {
+            isUsingAudioClock = false
+            lastAudioTime = nil
+            return duration
+        }
+
+        let isAdvancing = lastAudioTime.map { audioTime > $0 } ?? false
+        lastAudioTime = audioTime
+        guard isAdvancing else {
+            isUsingAudioClock = false
+            return duration
+        }
+
+        if !isUsingAudioClock {
+            audioClockOffset = duration - audioTime
+            isUsingAudioClock = true
+        }
+        return audioTime + audioClockOffset
     }
 }
 
@@ -64,19 +90,28 @@ extension MediaLink: AsyncRunner {
         }
         isRunning = true
         duration = 0.0
+        lastAudioTime = nil
+        audioClockOffset = 0
+        isUsingAudioClock = false
+        lastDisplayTimestamp = nil
         displayLink.startRunning()
         Task {
             for await currentTime in displayLink.updateFrames {
                 guard let storage else {
                     continue
                 }
-                let currentTime = await getCurrentTime(currentTime.targetTimestamp - currentTime.timestamp)
+                let displayInterval = lastDisplayTimestamp.map {
+                    currentTime.timestamp - $0
+                } ?? (currentTime.targetTimestamp - currentTime.timestamp)
+                lastDisplayTimestamp = currentTime.timestamp
+                let elapsed = displayInterval.isFinite && displayInterval > 0 ? displayInterval : 1.0 / 60.0
+                let playbackTime = await getCurrentTime(elapsed)
                 var frameCount = 0
                 while !storage.isEmpty {
                     guard let first = storage.head else {
                         break
                     }
-                    if first.presentationTimeStamp.seconds - presentationTimeStampOrigin.seconds <= currentTime {
+                    if first.presentationTimeStamp.seconds - presentationTimeStampOrigin.seconds <= playbackTime {
                         continutation?.yield(first)
                         frameCount += 1
                         _ = storage.dequeue()
@@ -98,6 +133,10 @@ extension MediaLink: AsyncRunner {
         continutation = nil
         displayLink.stopRunning()
         presentationTimeStampOrigin = .invalid
+        lastAudioTime = nil
+        audioClockOffset = 0
+        isUsingAudioClock = false
+        lastDisplayTimestamp = nil
         try? storage?.reset()
         isRunning = false
     }
