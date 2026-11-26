@@ -11,6 +11,7 @@ extension VTDecompressionSession: VTSessionConvertible {
     func convert(_ sampleBuffer: CMSampleBuffer, continuation: AsyncStream<CMSampleBuffer>.Continuation?) throws {
         var flagsOut: VTDecodeInfoFlags = []
         var _: VTEncodeInfoFlags = []
+        let sourceFormat = sampleBuffer.formatDescription
         let status = VTDecompressionSessionDecodeFrame(
             self,
             sampleBuffer: sampleBuffer,
@@ -47,6 +48,10 @@ extension VTDecompressionSession: VTSessionConvertible {
                     sampleBufferOut: &sampleBuffer
                 )
                 if let sampleBuffer {
+                    if let sourceFormat {
+                        CMSetAttachment(sampleBuffer, key: "org.haishinkit.sourceVideoFormatDescription" as CFString,
+                                        value: sourceFormat, attachmentMode: kCMAttachmentMode_ShouldNotPropagate)
+                    }
                     continuation?.yield(sampleBuffer)
                 }
             }
